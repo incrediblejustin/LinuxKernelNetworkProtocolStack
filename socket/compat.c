@@ -784,21 +784,27 @@ asmlinkage long compat_sys_recvmmsg(int fd, struct compat_mmsghdr __user *mmsg,
 
 	return datagrams;
 }
+/*	孙小强，2016年11月18日15:56:11
 
+	1. 判断参数 call 是否在操作码所表示的范围内
+	2. 将参数 args 所表示的用户空间的数据（ 总共`nas(call)` ）个拷贝到内核空间的变量中
+	3. 通过一个 `switch(call)`，如果不同的操作码来调用相应的套接字的系统调用（如：`sys_socket()`, `sys_bind()`,etc）
+	4. 该函数的返回结果就是以上系统调用的返回结果
+*/
 asmlinkage long compat_sys_socketcall(int call, u32 __user *args)
 {
 	int ret;
 	u32 a[6];
 	u32 a0, a1;
 
-	if (call < SYS_SOCKET || call > SYS_RECVMMSG)
+	if (call < SYS_SOCKET || call > SYS_RECVMMSG)// 1
 		return -EINVAL;
-	if (copy_from_user(a, args, nas[call]))
+	if (copy_from_user(a, args, nas[call]))// 2
 		return -EFAULT;
 	a0 = a[0];
 	a1 = a[1];
 
-	switch (call) {
+	switch (call) {// 3
 	case SYS_SOCKET:
 		ret = sys_socket(a0, a1, a[2]);
 		break;
@@ -864,5 +870,5 @@ asmlinkage long compat_sys_socketcall(int call, u32 __user *args)
 		ret = -EINVAL;
 		break;
 	}
-	return ret;
+	return ret;// 4
 }
