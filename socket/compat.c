@@ -784,7 +784,7 @@ asmlinkage long compat_sys_recvmmsg(int fd, struct compat_mmsghdr __user *mmsg,
 
 	return datagrams;
 }
-/*	孙小强，2016年11月18日15:56:11
+/*sys_socketcall(), 孙小强，2016年11月18日15:56:11
 
 	1. 判断参数 call 是否在操作码所表示的范围内
 	2. 将参数 args 所表示的用户空间的数据（ 总共`nas(call)` ）个拷贝到内核空间的变量中
