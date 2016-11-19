@@ -1,19 +1,21 @@
-#套接字基础
+## 1. 套接字基础
 ![](./pic/kingkang1.jpg)
 
-##系统调用入口
+### 1.1 系统调用入口
 
 进程与内核交互是通过一组定义好的函数函数来进行的，这些函数成为系统调用。
 
-##系统调用机制（linux在i386上的实现）
+### 1.2 系统调用机制（linux在i386上的实现）
 
 1.  每一个系统调用均被编号， 成为系统调用号
 2.  当进程进行一个系统调用时， 要通过终端指令 **INT 80H**, 从用户空间进入内核空间，并将系统调用号作为参数传递给内核函数
 3.  在 linux 系统中所有的系统调用都会进入系统的同一个地址， 这个地址称为 **system_call**
 4.  最终根据系统调用号， 调用系统调用表 **sys_call_table** 中的某一个函数
+5. socket系统调用在套接字层、传输层、网络层之间的调用关系（以 `sendmsg()` 为例）
 
+![](./pic/7.1_1.jpg)
 
-##套接字的系统调用
+### 1.3 套接字的系统调用
 
 - **建立**
 	- `socket`:	 	在指明的通信域内产生一个 未命名 的套接字
@@ -49,17 +51,17 @@
 	- `getpeername`:	得到分配给套接字的远端地址
 
 
-##socket系统调用号
-
-	系统中所有的 socket 系统调用总入口为 sys_socketcall() 有两个参数 call , args
+### 1.4 socket系统调用号
+![](./pic/7.1_2.png)
 	
-##`sys_socketcall()`
-
+	
+### 1.5 `sys_socketcall()`
+		系统中所有的 socket 系统调用总入口为 sys_socketcall() 有两个参数 call , args
+		
 - **参数说明**
 
 	- **call**，  **操作码**，函数中通过操作码跳转到真正的系统调用函数
 	- **args**， **指向一个数组的指针 **，指向用户空间，表示系统调用的参数
-![7.1_2](./pic/7.1_2.png)
 
 - **工作流程**
 
@@ -76,10 +78,10 @@
 -----------------------------------------------------------------------
 
 
-# `socket`系统调用
+## 2. `socket`系统调用
 ![](./pic/kingkang2.jpg)
 ----
-##`sys_socket()`
+### 2.1 `sys_socket()`
 	sys_socket() 把套接字的创建 和 与此套接字关联的文件描述符的分配做了简单的封装，完成创建套接字的功能
 
  - **参数说明**
@@ -103,7 +105,7 @@
 	- `sock_map_fd()` 为创建好的套接字分配一个文件描述符，并绑定
 3. 返回错误值
 	
-## `__sock_create()`
+##  2.2 `__sock_create()`
 	sock_create() 内部对__sock_create() 做了调用，
 
 - **参数说明**
@@ -128,8 +130,9 @@
 8. `try_module_get(sock->ops->owner)`, 如果`sock->ops`是以内核模块的方式动态加载，并且注册到内核中的，则需要对内核模块引用计数加一（ ），防止创建过程中此内核模块被动态卸载
 9. `module_put(pf->owner)`, 完成对IPv4协议族中的`inet_create()`调用完后，对模块的引用计数减一, 进行一系列错误检查创建完成
 	
-##`inet_create()`
+### 2.3 `inet_create()`
 		 与协议族有关的套接字以及传输控制块创建过程在这个函数之后全部结束，返回到创建套接字的统一接口中
+
 - **参数说明**
 
 	- **sock**， 已经在__sock_create()中创建的套接字
@@ -137,19 +140,19 @@
 
 
 - **工作流程**
-	
-0. 	 [sys_socket.c/inet_create() ](./sys_socket.c),中注释了源码
-1. 	`sock->state = SS_UNCONNECTED`, 将套接字的状态注册成**SS_UNCONNECTED**
+
+0. [sys_socket.c/inet_create() ](./sys_socket.c),中注释了源码
+1. `sock->state = SS_UNCONNECTED`, 将套接字的状态注册成**SS_UNCONNECTED**
 2. `list_for_each_rcu(),`**将sock->type作为关键字遍历inetsw散列表**
 3. `list_entry()`，通过计算偏移的方法获取指向 inet_protosw 的结果的指针
 4. 根据参数类型获取匹配的 inet_protosw 结构体的实例
-5. 如果不能再 inetsw中获得匹配的inet_protosw 结构的实例，则需加载相应的内核模块，再返回第五步，（最多尝试两次，失败则会退出）
+5. 如果不能再 inetsw 中获得匹配的 inet_protosw 结构的实例，则需加载相应的内核模块，再返回第五步，（最多尝试两次，失败则会退出）
 6. 判断当前进程是否有*answer->capability*（保存在进程的描述符中国）的能力，如果没有则不能创建套接字
 7. `sock->ops = answer->ops`, 用来设置套接字层 和 传输层之间的接口ops
 8. `sk_alloc()`, 用来**分配一个传输控制块**，返回值放在**sk**中
 9. 设置传输模块是否需要校验(**sk->sk_no_check**) 和 是否可以重用地址和端口标志（**sk->sk_reuse**）
-10. 设置**inet_sock**块(** *inet**)中的**is_icsk,** 用来标识是否为面向连接的传输控制块
-11. 如果套接字为原始类型，则设置本地端口为协议号 并且 inet->hdrincl 表示需要自己构建 IP 首部
+10. 设置 **inet_sock** 块中的 **is_icsk** ,用来标识是否为面向连接的传输控制块
+11. 如果套接字为原始类型，则设置本地端口为协议号 并且 **inet->hdrincl** 表示需要自己构建 IP 首部
 12. 设置传输模块是否支持 PMTU(动态发现因特网上任意一条路径的最大传输单元(MTU)的技术)
 13. `sock_init_data(sock, sk)`, 对传输控制块进行了初始化。
 14. 初始化**sk->destruct**, 在套接字释放时回调，用来清理和回收资源，设置传输控制字协议族(**sk->sk_family**)和协议号标识(**sk->sk_protocol**)
@@ -158,5 +161,55 @@
 17. 如果sk->sk_prot->init指针已经被设置，则会调用sk->sk_prot->init(sk)来进行具体传输控制块的初始化（TCP: `tcp_v4_init_sock()`,无UDP）
 
 
-				 
-			 
+-----------------				 
+## 3. `bind` 系统调用
+![](./pic/kingkang3.jpg)
+
+### 3.1 `sys_bind()`
+		bind 系统调用将一个本地的地址 及 传输层的端口 和 套接字 关联起来
+		一般作为客户端进程并不关心它的本地地址和端口是什么，所以没有必要调用 bind()，内核将会自动为其选择一个本地地址和端口
+		
+- **参数说明**
+
+	- **fd**, 进行绑定的套接字的文件描述符
+	- **umayaddr**, 进行绑定的地址
+	- **addrlen**，进行绑定地址的长度.(不同协议族的地址描述结构不一样， 所以需要长度)
+
+- **工作流程**
+
+0. [sys_socket.c/SYSCALL_DEFINE3()](./sys_socket.c)中注释了源码
+1. 首先创建 **struct socket** 类型的指针 **sock**
+2. `sockfd_lookup_light()`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志
+3. `move_addr_to_kernel(umyaddr, addrlen, address)`,  **address**字符型数组用来保存地址从用户空间传进来的绑定地址
+4. `security_socket_bind()`，安全模块对套接字bind做检查
+5. `sock->ops->bind()`, 在 **inet_create()** 第 8 步中设置了套接字层与传输层之间的接口 **ops** ,所有类型的套接字的 bind 接口是统一的即 `inet_bind()` ，他将实现传输层接口 bind 的有关调用
+	- **RAW:** `sk->sk_prot->bind()` ---> `raw_bind()`
+	- **TCP/UDP:** `sk->sk_prot->get_port()`
+		- **TCP:** `tcp_v4_get_port()`
+		- **UCP:** `rdp_v4_get_port()`
+6. `fput_light()`, 根据第二步中获得标志， 对文件的引用计数进行操作
+
+
+### 3.2 `inet_bind()`
+	所有类型的套接字的 bind 接口是统一的即 `inet_bind()` ，他将实现传输层接口 bind 的有关调用， 是 bind 系统调用的套接字层的实现
+
+- **参数说明**
+
+	- **sock**, 套接字指针类型，`sys_bind()` 中根据 fd 获得的套接字指针
+	- **uaddr**, 绑定地址，`struct sockaddr` 结构体类型指针，即	`（struct sockaddr *）address` , address 是一个字符数组从 用户空间  拷贝到 内核空间
+	- **addr_len**, 绑定地址的长度
+
+- **工作流程**
+
+0. [sys_socket.c/inet_bind()](./sys_socket.c)中注释了源码
+1. **addr**、**sk** 、**inet**指针， 分别是`（struct socketaddr_in）uaddr`、`sock->sk` 、`inet_sk(sk)`
+2. `sk->sk_prot`, 在`inet_create()` 中 `sk_alloc()` 中被初始化，如果是TCP套接字该值就是**tcp_prot**，只有RAW 类型（**SOCK_RAW**）的套接字才可以直接调用传输层接口上的 bind()， 即当前套接字在传输层接口上有 bind 的实现( `raw_bind()` )，`sk->sk_prot->bind` 为真，完成后可以直接返回
+3. 若没有 bind 的实现，则需要对绑定地址的长度进行合法性检查
+4. `inet_addr_type(addr->sin_addr.sin_addr)`， 根据**绑定地址中的地址参数**得到地址的类型(组播，广播，单播...)
+5. 对上一步得到的地址类型进行检查，判断是否可以进行地址和端口的绑定
+6. 将绑定地址中的网络字节序的端口号转换成本机的字节序，并对端口进行合法性校验，并且还要判断是否允许绑定小于1024的特权端口，保存在 **snum** 中
+7. `sk->sk_state != TCP_CLOSE || inet->inet_num`, 如果套接字的状态不是TCP_CLOSE或者已经是绑定过的套接字则会返回错误
+8. `inet->inet_rcv_saddr = inet->inet_saddr = addr->sin_addr.s_addr`,   将传入的绑定地址设置到传输控制块中
+9. `sk->sk_prot->get_port(sk, snum)`,  调用传输层 `get_port`进行具体的传输层的地址绑定，该 **get_port()** 对应的**TCP:** `tcp_v4_get_port()`, **UCP:** `rdp_v4_get_port()`
+10. `sk->sk_userlocks |= SOCK_BINDADDR_LOCK;sk->sk_userlocks |= SOCK_BINDPORT_LOCK;`   标识了传输控制块已经绑定了 **本地地址** 和 **本地端口**
+11. `inet->sport = htons(inet->num)` 设置本地端口.   再初始化目的地址和目的端口为0

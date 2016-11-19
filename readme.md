@@ -6,3 +6,6 @@
 ### day 2, 2016年11月18日20:24:07
 	增加了对`sys_socket(), sock_create, __sock_create(), inet_create()`的完全注释
 	socket的创建过程已经完成，接下来就要对绑定函数完成剖析
+### day 3, 2016年11月19日23:57:15
+	完成了sys_bind(), inet_bind() 的完全注释
+	
