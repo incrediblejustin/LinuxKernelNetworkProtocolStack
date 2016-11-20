@@ -8,4 +8,6 @@
 	socket的创建过程已经完成，接下来就要对绑定函数完成剖析
 ### day 3, 2016年11月19日23:57:15
 	完成了sys_bind(), inet_bind() 的完全注释
-	
+### day 4, 2016年11月20日22:43:03
+	sys_listen(), inet_listen(), inet_csk_listen_start(),都已经完成
+	记下来就是 accept 系统调用

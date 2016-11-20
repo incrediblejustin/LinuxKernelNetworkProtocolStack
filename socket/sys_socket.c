@@ -495,3 +495,137 @@ out:
 	return err;
 }
 
+
+
+/*sys_socket(), 孙小强，2016年11月20日22:41:44
+* 
+* 1. 首先创建 **struct socket** 类型的指针 **sock**
+* 2. `sockfd_lookup_light()`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志
+* 3. 如果 backlog 的值大于系统设置的门限值( 128 )，将 backlog 设为系统门限的最大值
+* 4. 安全模块对套接字的 listen 做检查
+* 5. 通过套接字与接口层的接口 sock->ops 来调用传输层的 listen 操作
+* 	- **SOCK_DGRAM 和 SOCK_RAW 类型不支持 listen**
+* 	- **SOCK_STREAM 类型支持 listen， TCP对应的是** `inet_listen()`
+* 6. `fput_light()`, 根据第二步中获得标志， 对文件的引用计数进行操作
+* 
+* 
+*/
+/*
+ *	Perform a listen. Basically, we allow the protocol to do anything
+ *	necessary for a listen, and if that works, we mark the socket as
+ *	ready for listening.
+ */
+SYSCALL_DEFINE2(listen, int, fd, int, backlog)
+{
+	struct socket *sock; // 1
+	int err, fput_needed;
+	int somaxconn;
+
+	sock = sockfd_lookup_light(fd, &err, &fput_needed); // 2
+	if (sock) {
+		somaxconn = sock_net(sock->sk)->core.sysctl_somaxconn;
+		if ((unsigned)backlog > somaxconn) // 3
+			backlog = somaxconn;
+
+		err = security_socket_listen(sock, backlog); // 4
+		if (!err)
+			err = sock->ops->listen(sock, backlog); // 5
+
+		fput_light(sock->file, fput_needed); // 6
+	}
+	return err;
+}
+
+
+/*
+ *	Move a socket into listening state.
+ */
+int inet_listen(struct socket *sock, int backlog)
+{
+	struct sock *sk = sock->sk;
+	unsigned char old_state;
+	int err;
+
+	lock_sock(sk);
+
+	err = -EINVAL;
+	if (sock->state != SS_UNCONNECTED || sock->type != SOCK_STREAM)
+		goto out;
+
+	old_state = sk->sk_state;
+
+	if (!((1 << old_state) & (TCPF_CLOSE | TCPF_LISTEN)))
+		goto out;
+
+	/* Really, if the socket is already in listen state
+	 * we can only allow the backlog to be adjusted.
+	 */
+	if (old_state != TCP_LISTEN) {
+		err = inet_csk_listen_start(sk, backlog);
+		if (err)
+			goto out;
+	}
+	sk->sk_max_ack_backlog = backlog;
+	err = 0;
+
+out:
+	release_sock(sk);
+	return err;
+}
+ 
+
+
+/*inet_csk_listen_start(), 孙小强，2016年11月20日22:39:30
+*
+* 1. `struct inet_sock *inet = inet_sk(sk)`
+* 	`struct inet_connection_sock *icsk = inet_csk(sk)`
+* 2. `reqsk_queue_alloc()`, 为管理连接请求块的散列表分配存储空间(**nr_table_entries**个)，如果分配失败就返回错误
+* 3. 将**连接队列的上限值**（`sk->sk_max_ack_backlog = 0`
+* ） 和 **已经建立连接数**（`sk->sk_ack_backlog = 0`） 清零
+* 4. `inet_csk_delack_init(sk)`, 初始化传输控制块中与演示发送ACK段有关的控制数据结构**icsk_ack**
+* 5. `sk->sk_state = TCP_LISTEN`,  **将传输控制块的状态置为监听状态, TCP_LISTEN**
+* 6. `sk->sk_prot->get_port(sk, inet->num)`,  通过传输控制块和端口号来判断是否绑定端口
+* 	- 如果端口是没有绑定，则进行绑定操作，绑定成功，返回0
+* 	- 如果绑定了，则对绑定的端口进行校验，校验成功，返回0
+* 7. 如果第六步成功
+* 	- 根据端口号(`inet->num`)设置传输控制块中的端口号成员(`inet->sport` 网络字节序)
+* 	- `sk_dst_reset(sk)`, 清空缓存在传输控制块中的目的路有缓存
+* 	- `sk->sk_prot->hash(sk)`，调用hash接口的 inet_hash() 将传输控制块添加到监听散列表中（listening_hash）,完成监听
+* 8. 如果第六步失败，  套接字类型改为 **TCP_CLOSE**, 释放申请到的管理连接请求块的是你列表存储空间
+* 	
+*/
+int inet_csk_listen_start(struct sock *sk, const int nr_table_entries)
+{
+	struct inet_sock *inet = inet_sk(sk); //i 1
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	int rc = reqsk_queue_alloc(&icsk->icsk_accept_queue, nr_table_entries); // 2
+
+	if (rc != 0)
+		return rc;
+
+	sk->sk_max_ack_backlog = 0; // 3
+	sk->sk_ack_backlog = 0;
+
+	inet_csk_delack_init(sk); // 4
+
+	/* There is race window here: we announce ourselves listening,
+	 * but this transition is still not validated by get_port().
+	 * It is OK, because this socket enters to hash table only
+	 * after validation is complete.
+	 */
+
+	sk->sk_state = TCP_LISTEN; // 5
+
+	if (!sk->sk_prot->get_port(sk, inet->num)) { // 6
+		inet->sport = htons(inet->num); // 7
+
+		sk_dst_reset(sk);
+		sk->sk_prot->hash(sk);
+
+		return 0;
+	}
+
+	sk->sk_state = TCP_CLOSE; // 8
+	__reqsk_queue_destroy(&icsk->icsk_accept_queue);
+	return -EADDRINUSE;
+}
