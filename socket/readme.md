@@ -82,7 +82,8 @@
 ![](./pic/kingkang2.jpg)
 ----
 ### 2.1 `sys_socket()`
-	sys_socket() 把套接字的创建 和 与此套接字关联的文件描述符的分配做了简单的封装，完成创建套接字的功能
+	sys_socket() 把套接字的创建 和
+	与此套接字关联的文件描述符的分配做了简单的封装，完成创建套接字的功能
 
  - **参数说明**
 
@@ -131,7 +132,8 @@
 9. `module_put(pf->owner)`, 完成对IPv4协议族中的`inet_create()`调用完后，对模块的引用计数减一, 进行一系列错误检查创建完成
 	
 ### 2.3 `inet_create()`
-		 与协议族有关的套接字以及传输控制块创建过程在这个函数之后全部结束，返回到创建套接字的统一接口中
+		 与协议族有关的套接字以及传输控制块创建过程在这个函数之后全部结束
+		 返回到创建套接字的统一接口中
 
 - **参数说明**
 
@@ -168,7 +170,8 @@
 
 ### 3.1 `sys_bind()`
 		bind 系统调用将一个本地的地址 及 传输层的端口 和 套接字 关联起来
-		一般作为客户端进程并不关心它的本地地址和端口是什么，所以没有必要调用 bind()，内核将会自动为其选择一个本地地址和端口
+		一般作为客户端进程并不关心它的本地地址和端口是什么，所以没有必要调用 bind()
+		，内核将会自动为其选择一个本地地址和端口
 		
 - **参数说明**
 
@@ -192,7 +195,8 @@
 
 
 ### 3.2 `inet_bind()`
-	所有类型的套接字的 bind 接口是统一的即 `inet_bind()` ，他将实现传输层接口 bind 的有关调用， 是 bind 系统调用的套接字层的实现
+	所有类型的套接字的 bind 接口是统一的即 `inet_bind()`
+	他将实现传输层接口 bind 的有关调用， 是 bind 系统调用的套接字层的实现
 
 - **参数说明**
 
@@ -214,3 +218,73 @@
 9. `sk->sk_prot->get_port(sk, snum)`,  调用传输层 `get_port`进行具体的传输层的地址绑定，该 **get_port()** 对应的**TCP:** `tcp_v4_get_port()`, **UCP:** `rdp_v4_get_port()`
 10. `sk->sk_userlocks |= SOCK_BINDADDR_LOCK;sk->sk_userlocks |= SOCK_BINDPORT_LOCK;`   标识了传输控制块已经绑定了 **本地地址** 和 **本地端口**
 11. `inet->sport = htons(inet->num)` 设置本地端口.   再初始化目的地址和目的端口为0
+
+
+-------------
+
+## 4. `listen` 系统调用
+![](./pic/wonderwomen2.gif)
+
+
+### 4.1 `sys_listen()` 
+		1. listen 系统调用用于通知进程准备接受套接字上的连接请求
+		2. 它同时制定套接字上可以等待的连接数的门限值
+		3. 超过门限值时，套接字将拒绝新的连接请求，TCP将忽略进入的连接请求
+
+- **参数说明**
+
+	- **fd**, 进行监听的套接字
+	- **backlog**, 指定连接队列长度的最大值
+
+
+- **工作流程**
+	
+0. [sys_socket.c/SYSCALL_DEFINE2( )](./sys_socket.c)中注释了源码
+1. 首先创建 **struct socket** 类型的指针 **sock**
+2. `sockfd_lookup_light()`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志
+3. 如果 backlog 的值大于系统设置的门限值( 128 )，将 backlog 设为系统门限的最大值
+4. 安全模块对套接字的 listen 做检查
+5. 通过套接字与接口层的接口 sock->ops 来调用传输层的 listen 操作
+	- **SOCK_DGRAM 和 SOCK_RAW 类型不支持 listen**
+	- **SOCK_STREAM 类型支持 listen， TCP对应的是** `inet_listen()`
+6. `fput_light()`, 根据第二步中获得标志， 对文件的引用计数进行操作
+
+
+
+
+###4.2 `inet_listen()`
+		1. inet_listen() 函数首先对调用 listen 的套接字当前状态和类型进行检查
+		2. 如果套接字状态不是 SS_UNCONNECTED， 或者类型不是 SOCK_STREAM，则返回错误
+		3. 调用 inet_csk_listen_start()
+		4. 将请求队列长度的最大值设置为 backlog(或者是系统最大值)
+
+###4.3  `inet_csk_listen_start()`
+		1. 申请管理连接请求块的空间
+		2. 将套接字状态改为监听
+		3. 将传输控制块加入到请求列表中完成监听
+
+- **参数说明**
+
+	- **sk**, 套接字结构体中的 sk  成员变量 (struct sock*)
+	- **nr_table_entries**, 指定连接队列长度的最大值
+
+
+- **工作流程**
+
+0. [sys_socket.c/inet_csk_listen_start( )](./sys_socket.c)中注释了源码
+1. 	`struct inet_sock *inet = inet_sk(sk)`
+	`struct inet_connection_sock *icsk = inet_csk(sk)`
+2. `reqsk_queue_alloc()`, 为管理连接请求块的散列表分配存储空间(**nr_table_entries**个)，如果分配失败就返回错误
+3. 将**连接队列的上限值**（`sk->sk_max_ack_backlog = 0`
+） 和 **已经建立连接数**（`sk->sk_ack_backlog = 0`） 清零
+4. `inet_csk_delack_init(sk)`, 初始化传输控制块中与演示发送ACK段有关的控制数据结构**icsk_ack**
+5. `sk->sk_state = TCP_LISTEN`,  **将传输控制块的状态置为监听状态, TCP_LISTEN**
+6. `sk->sk_prot->get_port(sk, inet->num)`,  通过传输控制块和端口号来判断是否绑定端口
+	- 如果端口是没有绑定，则进行绑定操作，绑定成功，返回0
+	- 如果绑定了，则对绑定的端口进行校验，校验成功，返回0
+7. 如果第六步成功
+	- 根据端口号(`inet->num`)设置传输控制块中的端口号成员(`inet->sport` 网络字节序)
+	- `sk_dst_reset(sk)`, 清空缓存在传输控制块中的目的路有缓存
+	- `sk->sk_prot->hash(sk)`，调用hash接口的 inet_hash() 将传输控制块添加到监听散列表中（listening_hash）,完成监听
+8. 如果第六步失败，  套接字类型改为 **TCP_CLOSE**, 释放申请到的管理连接请求块的是你列表存储空间
+	
