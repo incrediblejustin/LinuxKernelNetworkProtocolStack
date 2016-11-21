@@ -288,3 +288,77 @@
 	- `sk->sk_prot->hash(sk)`，调用hash接口的 inet_hash() 将传输控制块添加到监听散列表中（listening_hash）,完成监听
 8. 如果第六步失败，  套接字类型改为 **TCP_CLOSE**, 释放申请到的管理连接请求块的是你列表存储空间
 	
+
+
+## 5. `accept` 系统调用
+![](./pic/dr.strange1.gif)
+
+
+###  5.1 `sys_accept()`
+	调用listen()后，便可以调用accept()等待连接请求
+	accept()返回一个新的文件描述符，指向一个连接到客户的新的套接字文件
+	这个套接字坦然是未连接的，并要准备接受下一个连接
+
+- ** 参数说明 **
+	-  **fd**, 用来表示套接字的文件描述符
+	-  ** * upeer_sockaddr **, 用户空间自定义的、用来获取客户方socket地址的指针变量
+	-  ** * upeer_addrlen ** ，socket地址的长度的指针
+
+- ** 工作流程 **
+0. [sys_socket.c/SYSCALL_DEFINE4( )](./sys_socket.c)中注释了源码
+1. `sockfd_lookup_light(fd)`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志
+2. **newsock**，调用 `sock_alloc()` 分配一个新的套接字，用来处理客户端的连接
+3. 套接字的类型（`newsock->type`）和 **套接字的系统调用的跳转表**（`newsock->ops`）都有原来的 **sock** 给出
+4. `_module_get(newsock->ops->owner)`, 如果`newsock->ops`是以内核模块的方式动态加载，并且注册到内核中的，则需要对内核模块引用计数加一（ ），防止创建过程中此内核模块被动态卸载
+5. `sock_alloc_fd(&newfile)`，该函数为 **newsock** 分配一个文件描述符（返回结果为一个新的文件描述符，*newfile 是一个 struct file 结构体变量*）
+6. `sock_attach_fd(newsock, newfile)`，将新的套接字与引得文件描述符绑定
+7. `security_socket_accept()`，安全模块对套接字的accept做检查
+8. `sock->ops->accept()`，是通过套接字的系统调用的跳转表结构体(**sock->ops**)来调用相应的传输协议的accept操作，SOCK_DGRAM 和 SOCK_RAW 类型不支持 accept 接口，只有SOCK_STREAM 类型支持， **TCP 实现的函数为** `inet_accept()`
+9. `newsock->ops->getname()`, 如果需要获取客户方套接字的地址， 该操作如果成功就把获得地址拷贝到用户空间参数 **upeer_sockaddr** 指向的变量中，同时还有地址长度
+10. `fd_install(newfd, newfile)`,  将获得的文件描述符加入到当前进程已经打开的文件列表中，完成文件与进程的关联
+11. `fput_light()`, 根据第二步中获得标志， 对文件的引用计数进行操作,并返回文件描述符
+
+
+###  5.2 `inet_accept()`
+	通过调用 inet_csk_accept() 来获得一个已经三次握手过的传输控制块
+	将该传输控制块和新的套接字关联起来
+
+
+- ** 参数说明 **
+
+	- **sock**,  旧的套接字
+	- **newsock**, 新的套接字
+	- **flags**, 旧的套接字的文件描述符的标志(`sock->file->flags`)
+
+
+- **工作流程**
+
+0. [sys_socket.c/inet_accept( )](./sys_socket.c)中注释了源码
+1. 从原来的套接字中获得传输控制块的指针 **sk1**
+2. `sk1->sk_prot->accept ( )`,  调用 accept 的传输层接口实现`inet_csk_accept()`来获取**已完成连接（被接受）**的传输控制块（**sk2**），（**三次握手创建一个传输控制块**）
+3. `sock_graft(newsock, sk2)`, 用该函数将 newsock 和 sk2 关联起来
+4. 将新的套接字的状态(**newsock->state**)修改为 **SS_CONNECTED**
+
+
+### 5.3 `inet_csk_accept()`
+	从接受连接请求的队列中拿出一个传输控制块返回给新的套接字用来关联起来
+- **参数说明**
+
+	-   **sk**，新套接字对应的传输控制块
+	-   **flags** ，就套接字对应的文件描述符标志
+	-   **err**，错误信息
+
+
+- **工作流程**
+	
+0. [sys_socket.c/inet_csk_accept( )](./sys_socket.c)中注释了源码
+1. 对套接字的状态进行检查，当前的套接字必须是TCP_LISTEN状态
+2. `reqsk_queue_empty(&icsk->icsk_accept_queue)`
+		- **icsk**, 连接套接字的结构体类型，其中包含一个**icsk_accept_queue**
+		- **icsk_accept_queue**, 该队列中的已接受的成员是在 **tcp_v4_request()**中**inet_csk_reqst_queue_hash_add()** 函数添加进去的
+		- 如果该队列为空则表示没有接受到连接，否为接受到了连接
+3. 如果没有接受到连接，利用`sock_rcvtimeo()` 函数来获得套接字阻塞时间 **timeo**
+	- 如果该套接字是非阻塞的，则直接返回无需睡眠等待
+	- 如果该套接字是阻塞的，调用`inet_csk_wait_for_connect(sk, timeo)`，等待**timeo** 时间
+4. `reqsk_queue_get_child()`, 此处应该接受到了连接，用该函数从已接受的连接中取出传输控制块（**newsk**）
+5. `WARN_ON(newsk->sk_state == TCP_SYN_RECV)`，如果此时的套接字状态是**SYN_RECV** 则会发出警告，因为已经完成了三次握手此时的状态应处于**ESTABLISHED**状态
