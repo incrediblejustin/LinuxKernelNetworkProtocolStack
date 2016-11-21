@@ -631,7 +631,7 @@ int inet_csk_listen_start(struct sock *sk, const int nr_table_entries)
 }
 
 
-/*
+/*sys_accept，孙小强，2016年11月21日20:24:25
  * 1. `sockfd_lookup_light(fd)`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志
  * 2. **newsock**，调用 `sock_alloc()` 分配一个新的套接字，用来处理客户端的连接
  * 3. 套接字的类型（`newsock->type`）和 **套接字的系统调用的跳转表**（`newsock->ops`）都有原来的 **sock** 给出
@@ -722,7 +722,7 @@ out_fd:
 
 
 
-/*
+/*inet_accept(), 孙小强，2016年11月21日20:24:07
  * 
  * 1. 从原来的套接字中获得传输控制块的指针 **sk1**
  * 2. `sk1->sk_prot->accept ( )`,  调用 accept 的传输层接口实现`inet_csk_accept()`来获取**已完成连接（被接受）**的传输控制块（**sk2**），（**三次握手创建一个传输控制块**）
@@ -760,7 +760,7 @@ do_err:
 }
 
 
-/*
+/*inet_csk_accept(), 孙小强，2016年11月21日20:23:34
  * 
  * 1. 对套接字的状态进行检查，当前的套接字必须是TCP_LISTEN状态
  * 2. `reqsk_queue_empty(&icsk->icsk_accept_queue)`
