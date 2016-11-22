@@ -183,7 +183,7 @@
 
 0. [sys_socket.c/SYSCALL_DEFINE3()](./sys_socket.c)中注释了源码
 1. 首先创建 **struct socket** 类型的指针 **sock**
-2. `sockfd_lookup_light()`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志
+2. `sockfd_lookup_light()`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志(fput_needed)
 3. `move_addr_to_kernel(umyaddr, addrlen, address)`,  **address**字符型数组用来保存地址从用户空间传进来的绑定地址
 4. `security_socket_bind()`，安全模块对套接字bind做检查
 5. `sock->ops->bind()`, 在 **inet_create()** 第 8 步中设置了套接字层与传输层之间的接口 **ops** ,所有类型的套接字的 bind 接口是统一的即 `inet_bind()` ，他将实现传输层接口 bind 的有关调用
@@ -306,7 +306,7 @@
 
 - ** 工作流程 **
 0. [sys_socket.c/SYSCALL_DEFINE4( )](./sys_socket.c)中注释了源码
-1. `sockfd_lookup_light(fd)`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志
+1. `sockfd_lookup_light(fd)`,  根据文件描述符 **fd** 获取套接字的指针， 并且返回是否需要对文件引用计数的标志(fput_needed)
 2. **newsock**，调用 `sock_alloc()` 分配一个新的套接字，用来处理客户端的连接
 3. 套接字的类型（`newsock->type`）和 **套接字的系统调用的跳转表**（`newsock->ops`）都有原来的 **sock** 给出
 4. `_module_get(newsock->ops->owner)`, 如果`newsock->ops`是以内核模块的方式动态加载，并且注册到内核中的，则需要对内核模块引用计数加一（ ），防止创建过程中此内核模块被动态卸载
@@ -354,11 +354,105 @@
 0. [sys_socket.c/inet_csk_accept( )](./sys_socket.c)中注释了源码
 1. 对套接字的状态进行检查，当前的套接字必须是TCP_LISTEN状态
 2. `reqsk_queue_empty(&icsk->icsk_accept_queue)`
-		- **icsk**, 连接套接字的结构体类型，其中包含一个**icsk_accept_queue**
-		- **icsk_accept_queue**, 该队列中的已接受的成员是在 **tcp_v4_request()**中**inet_csk_reqst_queue_hash_add()** 函数添加进去的
-		- 如果该队列为空则表示没有接受到连接，否为接受到了连接
+	- **icsk**, 连接套接字的结构体类型，其中包含一个**icsk_accept_queue**
+	- **icsk_accept_queue**, 该队列中的已接受的成员是在 **tcp_v4_request()**中**inet_csk_reqst_queue_hash_add()** 函数添加进去的
+	- 如果该队列为空则表示没有接受到连接，否为接受到了连接
 3. 如果没有接受到连接，利用`sock_rcvtimeo()` 函数来获得套接字阻塞时间 **timeo**
 	- 如果该套接字是非阻塞的，则直接返回无需睡眠等待
 	- 如果该套接字是阻塞的，调用`inet_csk_wait_for_connect(sk, timeo)`，等待**timeo** 时间
 4. `reqsk_queue_get_child()`, 此处应该接受到了连接，用该函数从已接受的连接中取出传输控制块（**newsk**）
 5. `WARN_ON(newsk->sk_state == TCP_SYN_RECV)`，如果此时的套接字状态是**SYN_RECV** 则会发出警告，因为已经完成了三次握手此时的状态应处于**ESTABLISHED**状态
+
+
+
+----------------------
+
+## 6. `connect` 系统调用
+ ![](./pic/ironman1.gif)
+
+
+### 6.1 `sys_connect()`
+	1. connect() 建立一条与指定的外部地址的连接
+	2. 如果在connect() 调用之前没有绑定地址和端口，则会自动绑定一个地址和端口到套接字
+	3. IP地址是 tcp_v4_connect() 根据本地路由表分配的
+	4. 端口地址是由 inet_hash_connect() 中指定
+
+
+- **参数说明**
+
+	- fd，套接字绑定的文件描述符
+	- uservaddr，要连接的套接字地址
+	- addrlen，套接字的长度
+
+- **工作流程**
+	
+0. [sys_socket.c/sys_connect( )](./sys_socket.c)中注释了源码
+1. `sockfd_lookup_light(fd)`,  首先根据文件描述符 **fd** 获取套接字的指针（**sock**）， 并且返回是否需要对文件引用计数的标志(**fput_needed**)
+2. `move_addr_to_kernel( )`, 将用户空间的套接字地址 **uservaddr** 拷贝到 内核空间(address)
+3. 安全模块对套接字接口的 connect 做检查
+4.  通过套接字系统调用的跳转表调用对应的传输协议的 connect 操作
+
+	- **TCP:** `inet_stream_connect()`
+	- **UDP:** `inet_dgram_connect()`
+
+5. `fput_light()`, 根据第二步中获得标志， 对文件的引用计数进行操作,并返回文件描述符
+
+
+
+### 6.2 `inet_stream_connect()`
+		套接字层调用传输接口层的 tcp_v4_connect() 完成连接
+
+- **参数说明**
+
+	- **sock**，目标套接字
+	- **uaddr**，目标套接字的地址
+	- **addr_len**，套接字地址的长度
+	- **flags**，套接字对应文件描述符的标志位
+
+
+- **工作流程**
+
+0. [sys_socket.c/inet_stream_connect( )](./sys_socket.c)中注释了源码
+1. 根据 **sock->sk** 得到传输控制块（**sk**）
+2. 只有在套接字状态处于 **SS_UNCONNECTED** 状态 并且 传输控制块的状态为 **!TCP_CLOSE** 状态时 才会调用传输控制块上的 connect 接口
+
+	- **TCP:** `tcp_v4_connect(sk, uaddr, addr_len)`
+
+3. connect 成功后将套接字的状态置为 **SS_CONNECTING**
+4. `sock_sndtimeo(sk, flags & O_NONBLOCK)`，获取套接字的阻塞时间（**timeo**）
+5. 如果传输模块状态是 **TCPF_SYN_SENT** 或者 **TCPF_SYN_RECV** 时
+	- **如果套接字是阻塞，等待timeo时间后，释放传输模块再退出**
+	- **如果套接字是非阻塞，释放传输模块直接退出**
+6. 如果套接字不是以上的状态时， **再次判断传输模块是否为 TCP_CLOSE** ，防止( 中间判断的时候 产生 RST, 超时，ICMP 错误等是的连接关闭 )
+7. 将套接字状态修改为 **SS_CONNECTED**成功返回
+
+
+### 6.2 `tcp_v4_connect()`
+
+
+- **参数说明**
+
+	- **sk**，传输控制块
+	- **uaddr**，目标套接字地址
+	- **addr_len**，目标套接字地址长度
+
+- **工作流程**
+
+0. [sys_socket.c/tcp_v4_connect( )](./sys_socket.c)中注释了源码
+1. 参数有效范围判断
+	- **套接字地址长度 应>= 专用套接字的地址长度**
+	- **sin_family 应 == AF_INET**
+2. 将目标套接字地址转为专用套接字地址，再从中获得 IP地址（**nexthop, daddr**）
+3. `ip_route_connect()`，调用该函数根据下一跳地址等信息查找目标路由缓存，如果路由查找命中，则生成一个相应的**路由缓存项(rt)**，缓存项不但可以直接用于当前待发送SYN段，而且还对后续的所有数据包都可以起到加速路由查找的作用
+4. TCP 不能使用类型为组播或多播的路由缓存项目
+5. 如果没有启用源路由选项 则使用获取到的 **路由选项中的目的地址**(`daddr = rt->rt_dst`)
+6. 如果客户端没有本方在 connect 前没有指明套接字的IP地址（`inet->inet_saddr` 为空），就会在这里设置
+	-  `inet->inet_saddr = rt->rt_src;` **源地址**
+	-  `inet->inet_rcv_saddr = inet->inet_saddr;` **本方接收地址**
+7. 如果传输控制块中的时间戳 和 目的地址已经被使用过，则说明传输控制块已经建立过连接并进行过通讯，则需重新初始化它们
+8. 给传输控制块初始化 对端端口 和 地址
+9. 将TCP 状态设置为 **SYN_SEND** ，动态绑定一个本地端口，并将传输控制块添加到散列表中，由于在动态分配端口时，如果找到的是已经使用过端口，则需要在TIME_WAIT状态中进行相应的确认，因此调用 `inet_hash_connect()` 时需要TIMEWAIT传输控制块和参数管理器**tcp_death_row**作为参数
+10. `ip_route_newports()`，在路由表中重新缓存表中重新设置本地端口到目标端口的映射关系
+11. 根据传输控制块的路由输出设置特性 来设置 传输控制块中的路由网络设备的特性
+12. `secure_tcp_sequence_number()`，如果**write_seq**字段值为零，则说明传输控制块还没有设置初始序号，因此需要根据双发的地址端口计算初始序列号，同时根据发送需要 和当前时间得到用于设置IP首部ID域的值
+13. `tcp_connect(sk)`，构造并发送 SYN 段

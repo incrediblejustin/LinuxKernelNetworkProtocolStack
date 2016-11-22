@@ -820,3 +820,315 @@ out_err:
 
 
 
+
+/*sys_connect(), 孙小强，2016年11月23日00:36:28
+ * 
+ * 1. `sockfd_lookup_light(fd)`,  首先根据文件描述符 **fd** 获取套接字的指针（**sock**）， 并且返回是否需要对文件引用计数的标志(**fput_needed**)
+ * 2. `move_addr_to_kernel( )`, 将用户空间的套接字地址 **uservaddr** 拷贝到 内核空间(address)
+ * 3. 安全模块对套接字接口的 connect 做检查
+ * 4.  通过套接字系统调用的跳转表调用对应的传输协议的 connect 操作
+ * 		- **TCP:** `inet_stream_connect()`
+ * 		- **UDP:** `inet_dgram_connect()`
+ * 5. `fput_light()`, 根据第二步中获得标志， 对文件的引用计数进行操作,并返回文件描述符
+ * 
+ * 
+ */
+
+/*
+ *	Attempt to connect to a socket with the server address.  The address
+ *	is in user space so we verify it is OK and move it to kernel space.
+ *
+ *	For 1003.1g we need to add clean support for a bind to AF_UNSPEC to
+ *	break bindings
+ *
+ *	NOTE: 1003.1g draft 6.3 is broken with respect to AX.25/NetROM and
+ *	other SEQPACKET protocols that take time to connect() as it doesn't
+ *	include the -EINPROGRESS status for such sockets.
+ */
+
+SYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr,
+		int, addrlen)
+{
+	struct socket *sock;
+	struct sockaddr_storage address;
+	int err, fput_needed;
+
+	sock = sockfd_lookup_light(fd, &err, &fput_needed);  // 1
+	if (!sock)
+		goto out;
+	err = move_addr_to_kernel(uservaddr, addrlen, (struct sockaddr *)&address); // 2
+	if (err < 0)
+		goto out_put;
+
+	err =
+	    security_socket_connect(sock, (struct sockaddr *)&address, addrlen); // 3
+	if (err)
+		goto out_put;
+
+	err = sock->ops->connect(sock, (struct sockaddr *)&address, addrlen, // 4
+				 sock->file->f_flags);
+out_put:
+	fput_light(sock->file, fput_needed); // 5
+out:
+	return err;
+}
+
+
+
+/*inet_stream_accept(), 孙小强，2016年11月23日00:33:11
+ *
+ * 1. 根据 **sock->sk** 得到传输控制块（**sk**）
+ * 2. 只有在套接字状态处于 **SS_UNCONNECTED** 状态 并且 传输控制块的状态为 **!TCP_CLOSE** 状态时 才会调用传输控制块上的 connect 接口
+ * 		- **TCP:** `tcp_v4_connect(sk, uaddr, addr_len)`
+ * 3. connect 成功后将套接字的状态置为 **SS_CONNECTING**
+ * 4. `sock_sndtimeo(sk, flags & O_NONBLOCK)`，获取套接字的阻塞时间（**timeo**）
+ * 5. 如果传输模块状态是 **TCPF_SYN_SENT** 或者 **TCPF_SYN_RECV** 时
+ * 		- **如果套接字是阻塞，等待timeo时间后，释放传输模块再退出**
+ * 		- **如果套接字是非阻塞，释放传输模块直接退出**
+ * 6. 如果套接字不是以上的状态时， **再次判断传输模块是否为 TCP_CLOSE** ，防止( 中间判断的时候 产生 RST, 超时，ICMP 错误等是的连接关闭 )
+ * 7. 将套接字状态修改为 **SS_CONNECTED**成功返回
+ *
+ */
+/*
+ *	Connect to a remote host. There is regrettably still a little
+ *	TCP 'magic' in here.
+ */
+int inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+			int addr_len, int flags)
+{
+	struct sock *sk = sock->sk;  // 1
+	int err;
+	long timeo;
+
+	if (addr_len < sizeof(uaddr->sa_family))
+		return -EINVAL;
+
+	lock_sock(sk);
+
+	if (uaddr->sa_family == AF_UNSPEC) {
+		err = sk->sk_prot->disconnect(sk, flags);
+		sock->state = err ? SS_DISCONNECTING : SS_UNCONNECTED;
+		goto out;
+	}
+
+	switch (sock->state) {
+	default:
+		err = -EINVAL;
+		goto out;
+	case SS_CONNECTED:
+		err = -EISCONN;
+		goto out;
+	case SS_CONNECTING:
+		err = -EALREADY;
+		/* Fall out of switch with err, set for this state */
+		break;
+	case SS_UNCONNECTED: // 2
+		err = -EISCONN;
+		if (sk->sk_state != TCP_CLOSE) // 2
+			goto out;
+
+		err = sk->sk_prot->connect(sk, uaddr, addr_len);
+		if (err < 0)
+			goto out;
+
+		sock->state = SS_CONNECTING; // 3
+
+		/* Just entered SS_CONNECTING state; the only
+		 * difference is that return value in non-blocking
+		 * case is EINPROGRESS, rather than EALREADY.
+		 */
+		err = -EINPROGRESS;
+		break;
+	}
+
+	timeo = sock_sndtimeo(sk, flags & O_NONBLOCK); //4
+
+	if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV)) { // 5
+		/* Error code is set above */
+		if (!timeo || !inet_wait_for_connect(sk, timeo)) //5
+			goto out;
+
+		err = sock_intr_errno(timeo);
+		if (signal_pending(current))
+			goto out;
+	}
+
+	/* Connection was closed by RST, timeout, ICMP error
+	 * or another process disconnected us.
+	 */
+	if (sk->sk_state == TCP_CLOSE) // 6
+		goto sock_error;
+
+	/* sk->sk_err may be not zero now, if RECVERR was ordered by user
+	 * and error was received after socket entered established state.
+	 * Hence, it is handled normally after connect() return successfully.
+	 */
+
+	sock->state = SS_CONNECTED; //7
+	err = 0;
+out:
+	release_sock(sk);
+	return err;
+
+sock_error:
+	err = sock_error(sk) ? : -ECONNABORTED;
+	sock->state = SS_UNCONNECTED;
+	if (sk->sk_prot->disconnect(sk, flags))
+		sock->state = SS_DISCONNECTING;
+	goto out;
+}
+
+
+
+/*tcp_v4_connect(), 孙小强, 2016年11月23日00:26:52
+ * 
+ * 1. 参数有效范围判断
+ * 		- **套接字地址长度 应>= 专用套接字的地址长度**
+ * 		- **sin_family 应 == AF_INET**
+ * 2. 将目标套接字地址转为专用套接字地址，再从中获得 IP地址（**nexthop, daddr**）
+ * 3. `ip_route_connect()`，调用该函数根据下一跳地址等信息查找目标路由缓存，如果路由查找命中，则生成一个相应的**路由缓存项(rt)**，缓存项不但可以直接用于当前待发送SYN段，而且还对后续的所有数据包都可以起到加速路由查找的作用
+ * 4. TCP 不能使用类型为组播或多播的路由缓存项目
+ * 5. 如果没有启用源路由选项 则使用获取到的 **路由选项中的目的地址**(`daddr = rt->rt_dst`)
+ * 6. 如果客户端没有本方在 connect 前没有指明套接字的IP地址（`inet->inet_saddr` 为空），就会在这里设置
+ * 		-  `inet->inet_saddr = rt->rt_src;` **源地址**
+ * 		-  `inet->inet_rcv_saddr = inet->inet_saddr;` **本方接收地址**
+ * 7. 如果传输控制块中的时间戳 和 目的地址已经被使用过，则说明传输控制块已经建立过连接并进行过通讯，则需重新初始化它们
+ * 8. 给传输控制块初始化 对端端口 和 地址
+ * 9. 将TCP 状态设置为 **SYN_SEND** ，动态绑定一个本地端口，并将传输控制块添加到散列表中，由于在动态分配端口时，如果找到的是已经使用过端口，则需要在TIME_WAIT状态中进行相应的确认，因此调用 `inet_hash_connect()` 时需要TIMEWAIT传输控制块和参数管理器**tcp_death_row**作为参数
+ * 10. `ip_route_newports()`，在路由表中重新缓存表中重新设置本地端口到目标端口的映射关系
+ * 11. 根据传输控制块的路由输出设置特性 来设置 传输控制块中的路由网络设备的特性
+ * 12. `secure_tcp_sequence_number()`，如果**write_seq**字段值为零，则说明传输控制块还没有设置初始序号，因此需要根据双发的地址端口计算初始序列号，同时根据发送需要 和当前时间得到用于设置IP首部ID域的值
+ * 13. `tcp_connect(sk)`，构造并发送 SYN 段
+ * 
+ */
+/* This will initiate an outgoing connection. */
+int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+{
+	struct inet_sock *inet = inet_sk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct sockaddr_in *usin = (struct sockaddr_in *)uaddr;
+	struct rtable *rt;
+	__be32 daddr, nexthop;
+	int tmp;
+	int err;
+
+	if (addr_len < sizeof(struct sockaddr_in)) // 1
+		return -EINVAL;
+
+	if (usin->sin_family != AF_INET) // 1
+		return -EAFNOSUPPORT;
+
+	nexthop = daddr = usin->sin_addr.s_addr; // 2
+	if (inet->opt && inet->opt->srr) {
+		if (!daddr)
+			return -EINVAL;
+		nexthop = inet->opt->faddr;
+	}
+
+
+	tmp = ip_route_connect(&rt, nexthop, inet->inet_saddr, // 3
+			       RT_CONN_FLAGS(sk), sk->sk_bound_dev_if,
+			       IPPROTO_TCP,
+			       inet->inet_sport, usin->sin_port, sk, 1);
+	if (tmp < 0) { 
+		if (tmp == -ENETUNREACH)
+			IP_INC_STATS_BH(sock_net(sk), IPSTATS_MIB_OUTNOROUTES);
+		return tmp;
+	}
+
+
+	if (rt->rt_flags & (RTCF_MULTICAST | RTCF_BROADCAST)) { // 4
+		ip_rt_put(rt);
+		return -ENETUNREACH;
+	}
+
+	if (!inet->opt || !inet->opt->srr) // 5
+		daddr = rt->rt_dst;
+
+	if (!inet->inet_saddr) // 6
+		inet->inet_saddr = rt->rt_src;
+	inet->inet_rcv_saddr = inet->inet_saddr;
+
+	if (tp->rx_opt.ts_recent_stamp && inet->inet_daddr != daddr) { // 7
+		/* Reset inherited state */
+		tp->rx_opt.ts_recent	   = 0;
+		tp->rx_opt.ts_recent_stamp = 0;
+		tp->write_seq		   = 0;
+	}
+
+	if (tcp_death_row.sysctl_tw_recycle &&
+	    !tp->rx_opt.ts_recent_stamp && rt->rt_dst == daddr) {
+		struct inet_peer *peer = rt_get_peer(rt);
+		/*
+		 * VJ's idea. We save last timestamp seen from
+		 * the destination in peer table, when entering state
+		 * TIME-WAIT * and initialize rx_opt.ts_recent from it,
+		 * when trying new connection.
+		 */
+		if (peer != NULL &&
+		    (u32)get_seconds() - peer->tcp_ts_stamp <= TCP_PAWS_MSL) {
+			tp->rx_opt.ts_recent_stamp = peer->tcp_ts_stamp;
+			tp->rx_opt.ts_recent = peer->tcp_ts;
+		}
+	}
+
+	inet->inet_dport = usin->sin_port; // 8
+	inet->inet_daddr = daddr;
+
+	inet_csk(sk)->icsk_ext_hdr_len = 0;
+	if (inet->opt)
+		inet_csk(sk)->icsk_ext_hdr_len = inet->opt->optlen;
+
+	tp->rx_opt.mss_clamp = TCP_MSS_DEFAULT;
+
+	/* Socket identity is still unknown (sport may be zero).
+	 * However we set state to SYN-SENT and not releasing socket
+	 * lock select source port, enter ourselves into the hash tables and
+	 * complete initialization after this.
+	 */
+	
+	tcp_set_state(sk, TCP_SYN_SENT); // 9
+	err = inet_hash_connect(&tcp_death_row, sk); // 9
+	if (err)
+		goto failure;
+
+	err = ip_route_newports(&rt, IPPROTO_TCP, // 10
+				inet->inet_sport, inet->inet_dport, sk);
+	if (err)
+		goto failure;
+
+	/* OK, now commit destination to socket.  */
+
+	sk->sk_gso_type = SKB_GSO_TCPV4; // 11
+	sk_setup_caps(sk, &rt->u.dst); // 11
+
+
+	if (!tp->write_seq)
+		tp->write_seq = secure_tcp_sequence_number(inet->inet_saddr, // 12
+							   inet->inet_daddr,
+							   inet->inet_sport,
+							   usin->sin_port);
+
+	inet->inet_id = tp->write_seq ^ jiffies;
+
+
+	err = tcp_connect(sk); // 13
+	rt = NULL;
+	if (err)
+		goto failure;
+
+	return 0;
+
+failure:
+	/*
+	 * This unhashes the socket and releases the local port,
+	 * if necessary.
+	 */
+	tcp_set_state(sk, TCP_CLOSE);
+	ip_rt_put(rt);
+	sk->sk_route_caps = 0;
+	inet->inet_dport = 0;
+	return err;
+}
+
+

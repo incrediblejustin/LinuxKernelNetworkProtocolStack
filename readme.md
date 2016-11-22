@@ -14,3 +14,7 @@
 ### day 5, 2016年11月21日20:18:24
 	sys_accept(), inet_accept(), inet_csk_accept()完成！
 	赶紧吃饭啦！饿死啦！
+### day 6, 2016年11月23日00:44:23
+	下雪了，shiiiiiiiiit!
+	感冒了，shiiiiiiiiit!
+	只完成了tcp的connect，shiiiiiiiiit!
