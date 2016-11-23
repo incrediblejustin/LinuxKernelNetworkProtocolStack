@@ -1132,3 +1132,95 @@ failure:
 }
 
 
+/*inet_dgram_connect(), 孙小强，2016年11月23日23:12:27
+ *
+ *1. 根据参数 **sock** 获得传输控制块 **sk**
+ *2. 对参数的合法性进行判断
+ *3. `inet_autobind(sk)`, 如果传输控制块绑定个数为零, 就调用该函数为传输控制块绑定一个端口号
+ *4. 最后个调用传输控制块层的 connect 接口函数 `ip4_datagram_connect()` 来完成connect 
+ */
+
+int inet_dgram_connect(struct socket *sock, struct sockaddr * uaddr,
+		       int addr_len, int flags)
+{
+	struct sock *sk = sock->sk; // 1 
+
+	if (addr_len < sizeof(uaddr->sa_family)) // 2
+		return -EINVAL;
+	if (uaddr->sa_family == AF_UNSPEC) // 2
+		return sk->sk_prot->disconnect(sk, flags);
+
+	if (!inet_sk(sk)->inet_num && inet_autobind(sk))  // 3
+		return -EAGAIN;
+	return sk->sk_prot->connect(sk, (struct sockaddr *)uaddr, addr_len);  // 4
+}
+
+/*ip4_datagram_connect(), 孙小强， 2016年11月23日23:14:47
+ * 
+ * 1. 根据参数 **sk** 得到符合ipv4的传输控制块 **inet**，根据 **uaddr** 获得专用套接字地址 **usin**, 以及缓存内的路由表项 **rt**
+ * 2. 判断参数的合法性，套接字协议族必须为 **AF_INET**
+ * 3. `sk_dst_reset(sk)`, 将传输控制块设置为目标传输控制块
+ * 4. 如果目标地址属于多播，就把相应的属性设置到变量当中
+ * 5. `ip_route_connect()`，调用该函数根据下一跳地址等信息查找目标路由缓存，如果路由查找命中，则生成一个相应的**路由缓存项(rt)**，缓存项不但可以直接用于当前待发送SYN段，而且还对后续的所有数据包都可以起到加速路由查找的作用
+ * 6. 如果 connect 之前没有设置套接字地址，就将路由表项中的源地址和端口赋值给传输控制块 inet
+ * 7. 将传输控制块中的目标端口和地址 设置成 路由表项中的目的地址和目的端口
+ * 8. 将传输控制块 sk 的状态设置为 **TCP_ESTABLISHED**
+ * 9. 将传输控制块的目标地址 设置到 sk的目标地址
+ * 
+ */
+
+int ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+{
+	struct inet_sock *inet = inet_sk(sk); // 1 
+	struct sockaddr_in *usin = (struct sockaddr_in *) uaddr;
+	struct rtable *rt;
+	__be32 saddr;
+	int oif;
+	int err;
+
+
+	if (addr_len < sizeof(*usin))// 2
+		return -EINVAL;
+
+	if (usin->sin_family != AF_INET)
+		return -EAFNOSUPPORT;
+
+	sk_dst_reset(sk); // 3
+
+	oif = sk->sk_bound_dev_if;
+	saddr = inet->inet_saddr;
+	if (ipv4_is_multicast(usin->sin_addr.s_addr)) {  // 4
+		if (!oif)
+			oif = inet->mc_index;
+		if (!saddr)
+			saddr = inet->mc_addr;
+	}
+	err = ip_route_connect(&rt, usin->sin_addr.s_addr, saddr, // 5
+			       RT_CONN_FLAGS(sk), oif,
+			       sk->sk_protocol,
+			       inet->inet_sport, usin->sin_port, sk, 1);
+	if (err) {
+		if (err == -ENETUNREACH)
+			IP_INC_STATS_BH(sock_net(sk), IPSTATS_MIB_OUTNOROUTES);
+		return err;
+	}
+
+	if ((rt->rt_flags & RTCF_BROADCAST) && !sock_flag(sk, SOCK_BROADCAST)) {
+		ip_rt_put(rt);
+		return -EACCES;
+	}
+	if (!inet->inet_saddr) // 6
+		inet->inet_saddr = rt->rt_src;	/* Update source address */
+	if (!inet->inet_rcv_saddr) { // 6
+		inet->inet_rcv_saddr = rt->rt_src;
+		if (sk->sk_prot->rehash)
+			sk->sk_prot->rehash(sk);
+	}
+	inet->inet_daddr = rt->rt_dst; // 7
+	inet->inet_dport = usin->sin_port; // 7
+	sk->sk_state = TCP_ESTABLISHED; // 8
+	inet->inet_id = jiffies;
+
+	sk_dst_set(sk, &rt->u.dst); //9
+	return(0);
+}

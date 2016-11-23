@@ -18,3 +18,5 @@
 	下雪了，shiiiiiiiiit!
 	感冒了，shiiiiiiiiit!
 	只完成了tcp的connect，shiiiiiiiiit!
+### day 7, 2016年11月23日23:17:25
+	connect done!
