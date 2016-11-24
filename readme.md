@@ -20,3 +20,5 @@
 	只完成了tcp的connect，shiiiiiiiiit!
 ### day 7, 2016年11月23日23:17:25
 	connect done!
+### day 8, 2016年11月24日20:21:51
+	shutdown down :-)

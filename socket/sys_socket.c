@@ -1224,3 +1224,134 @@ int ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	sk_dst_set(sk, &rt->u.dst); //9
 	return(0);
 }
+
+
+
+
+/*sys_shutdown(), 孙小强，2016年11月24日20:15:25
+ * 
+ * 1. `sockfd_lookup_light(fd)`,  首先根据文件描述符 **fd** 获取套接字的指针（**sock**）， 并且返回是否需要对文件引用计数的标志(**fput_needed**)
+ * 2. 安全模块对 shutdown 操作进行安全检查
+ * 3. 根据套接字层的接口 **sock->ops** 来调用 `inet_shutdown`
+ * 
+ */
+/*
+ *	Shutdown a socket.
+ */
+SYSCALL_DEFINE2(shutdown, int, fd, int, how)
+{
+	int err, fput_needed;
+	struct socket *sock;
+
+	sock = sockfd_lookup_light(fd, &err, &fput_needed);  // 1
+	if (sock != NULL) {
+		err = security_socket_shutdown(sock, how); // 2
+		if (!err)
+			err = sock->ops->shutdown(sock, how); //3
+		fput_light(sock->file, fput_needed);
+	}
+	return err;
+}
+
+
+
+
+/*ient_shutdown(), 孙小强， 2016年11月24日20:17:39
+ *
+ * 1. 获取套接字的传输控制块 sk，接着对参数 how += 1 进行检查
+ * 2. 根据传输控制块的状态 sk->state 来设置套接字的状态,使之在关闭前只有两种状态
+ * 	- 如果传输控制块的状态 是 `TCPF_SYN_SENT | TCPF_SYN_RECV | TCPF_CLOSE`，就把套接字状态设置为 **SS_DISCONNECTING**
+ * 	- 如果不是就把套接字状态设置为 **SS_CONNECTED**
+ * 3. 如果传输控制块的状态处于其他状态，调用传输层接口的 shutdwon 进行具体的关闭操作，如果是 TCP 就调用 `tcp_shutdown(sk, how)`
+ * 4. 如果传输控制块的状态处于 **SYN_SENT** 则不允许继续连接，调用传输层接口的 disconnect 进行具体断开连接操作
+ * 5. 如果传输控制块的状态处于 **TCP_LISTEN** ,在判断是否为 SYN_SEND 看是否需要 调用 disconnect
+ * 6. `sk_state_change(sk)`, 唤醒在传输控制块的等待队列上的进程
+ *
+ */
+
+int inet_shutdown(struct socket *sock, int how)
+{
+	struct sock *sk = sock->sk; // 1
+	int err = 0;
+
+	/* This should really check to make sure
+	 * the socket is a TCP socket. (WHY AC...)
+	 */
+	how++; /* maps 0->1 has the advantage of making bit 1 rcvs and  // 1
+		       1->2 bit 2 snds.
+		       2->3 */
+	if ((how & ~SHUTDOWN_MASK) || !how)	/* MAXINT->0 */ 
+		return -EINVAL;
+
+	lock_sock(sk);
+	if (sock->state == SS_CONNECTING) { // 2
+		if ((1 << sk->sk_state) &
+		    (TCPF_SYN_SENT | TCPF_SYN_RECV | TCPF_CLOSE))
+			sock->state = SS_DISCONNECTING;
+		else
+			sock->state = SS_CONNECTED;
+	}
+
+	switch (sk->sk_state) {
+	case TCP_CLOSE:
+		err = -ENOTCONN;
+		/* Hack to wake up other listeners, who can poll for
+		   POLLHUP, even on eg. unconnected UDP sockets -- RR */
+	default:
+		sk->sk_shutdown |= how;
+		if (sk->sk_prot->shutdown) // 3
+			sk->sk_prot->shutdown(sk, how);
+		break;
+
+	/* Remaining two branches are temporary solution for missing
+	 * close() in multithreaded environment. It is _not_ a good idea,
+	 * but we have no choice until close() is repaired at VFS level.
+	 */
+	case TCP_LISTEN:
+		if (!(how & RCV_SHUTDOWN)) // 5
+			break;
+		/* Fall through */
+	case TCP_SYN_SENT:
+		err = sk->sk_prot->disconnect(sk, O_NONBLOCK); // 4
+		sock->state = err ? SS_DISCONNECTING : SS_UNCONNECTED;
+		break;
+	}
+
+	/* Wake up anyone sleeping in poll. */
+	sk->sk_state_change(sk); // 6
+	release_sock(sk);
+	return err;
+}
+
+
+/* tcp_shutdown(), 孙小强，2016年11月24日20:20:43
+ * 
+ * 1. **判断关闭方式是否为 1或者2**，如果不是则不需要关闭发送通道，因为发送 FIN 只是表示不再发送数据
+ * 2. 如果传输控制块具有 `TCPF_ESTABLISHED | TCPF_SYN_SENT | TCPF_SYN_RECV | TCPF_CLOSE_WAIT`这些状态；表示没有发送过 FIN、 或者传输控制块还没有关闭 ，就调用 `tcp_close_state()` 将传输控制块设置为关闭
+ * 3. 最后调用 `tcp_send_fin()` 来发送 `FIN`
+ * 
+ */
+
+
+/*
+ *	Shutdown the sending side of a connection. Much like close except
+ *	that we don't receive shut down or sock_set_flag(sk, SOCK_DEAD).
+ */
+void tcp_shutdown(struct sock *sk, int how)
+{
+	/*	We need to grab some memory, and put together a FIN,
+	 *	and then put it into the queue to be sent.
+	 *		Tim MacKenzie(tym@dibbler.cs.monash.edu.au) 4 Dec '92.
+	 */
+	if (!(how & SEND_SHUTDOWN)) // 1
+		return;
+
+	/* If we've already sent a FIN, or it's a closed state, skip this. */
+	if ((1 << sk->sk_state) & // 2
+	    (TCPF_ESTABLISHED | TCPF_SYN_SENT |
+	     TCPF_SYN_RECV | TCPF_CLOSE_WAIT)) {
+		/* Clear out any half completed packets.  FIN if needed. */
+		if (tcp_close_state(sk)) // 3
+			tcp_send_fin(sk);
+	}
+}
