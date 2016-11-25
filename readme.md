@@ -22,3 +22,5 @@
 	connect done!
 ### day 8, 2016年11月24日20:21:51
 	shutdown down :-)
+### day 9, 2016年11月26日00:31:04
+	close, 太多了我的天老爷！
