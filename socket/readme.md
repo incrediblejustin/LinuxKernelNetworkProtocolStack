@@ -566,3 +566,95 @@
 3. 最后调用 `tcp_send_fin()` 来发送 `FIN`
 
 
+----------------------
+
+## 8. `close` 系统调用
+ ![](./pic/foo7.gif)
+
+
+### 8.1 `sock_close()`
+
+- **参数说明**
+
+	- **inode**，待关闭套接字的 inode 节点
+	- **flip**，待关闭的套接字文件的描述符
+
+- **工作流程**
+	
+0. [sys_socket.c/sock_close( )](./sys_socket.c)中注释了源码
+1. 如果要关闭的套接字的节点为空，返回 0 结果
+2. `sock_fasync(-1, filp, 0)`，从与文件描述符 filp 关联的套接字的异步通知队列中删除与文件描述符 filp 有关的异步通知结点
+3. `sock_release(SOCKET_I(inode))`，关闭套接字
+
+### 8.2 `sock_release()`
+
+- **参数说明**
+
+	- **sock**，想要关闭的套接字
+
+	
+- **工作流程**
+	
+0. [sys_socket.c/sock_release( )](./sys_socket.c)中注释了源码
+1. `sock->ops->release()`, 通过调用套接字层的接口来完成对传输控制块的释放，同时对模块的引用计数减一，IPv4中所有的套接字的 release 接口都是`inet_release()`
+2. `sock_close()`，第二步已经处理了异步通知队列，如果还发现异步通知队列不为空，则表明系统处理有问题，要打印信息
+3. **sock_in_use**，用来统计当前的CPU打开的文件描述符的数量，更新该值
+4. 容错处理（如果系统处理错误，一般不会执行到），这里如果检测到了已经释放的套接字 !sock->file 为真，释放inode节点和套接字
+5. 将文件描述符指针置为空
+
+
+
+### 8.3 `inet_release()`
+	IPv4协议族中 close 系统调用的套接字层的实现
+	
+- **参数说明**
+
+	- **sock**，想要关闭的套接字
+
+	
+- **工作流程**
+
+0. [sys_socket.c/inet_release( )](./sys_socket.c)中注释了源码
+1. 获取套接字的传输控制块指针 **sk**
+2. `ip_mc_drop_socket()`，让该传输控制块脱离已经加入的组播组
+3. 如果当前套接字设置了 **SOCK_LINGER** 选项（有数据待发送），并且当前进程不在退出过程中，则获取延时关闭的时间（**timeout**）
+4. 通过传输层调用 close 接口(`tcp_close(sk, timeout)`)，用获取的延时关闭时间作为参数进行关闭操作
+
+### 8.4 `tcp_close()`
+	IPv4协议族中 close 系统调用的套接字层的实现
+![](./pic/8.1_1.png)
+
+- **参数说明**
+
+	- **sk**，想要关闭的套接字的传输控制块
+	- **timeout**，正在关闭控制块之间可以发送剩余数据的事件
+	
+- **工作流程**
+
+0. [sys_socket.c/tcp_close( )](./sys_socket.c)中注释了源码
+1. 设置传输控制块的关闭标志位为 SHUTDOWN_MASK，表示进行双向的关闭
+2. `tcp_set_state()`，如果套接字处于监听状态，说明没有进行连接，无需发送 FIN 等操作，直接将TCP的状态置为 **TCP_CLOSE** ，在调用`inet_csk_listen_stop()`（步骤3）
+3. `inet_csk_listen_stop()`，用来停止监听，完成后直接跳转至 **adjudge_to_death** 进行处理
+	- 停止 **sk_timer** 定时器，根据当前状态来终止 连接定时器、FIN_WAIT_2定时器、TCP保活定时器
+	- 删除并释放 TCP 传输控制块中半连接状态的请求块
+	- 调用 `tcp_disconnect()` 断开并且删除和释放已经建立但没有被 accept 的传输控制块，再删除并释放已经接收到接收队列 -- 包括失序队列上的段 和 发送队列上的段
+4. 如果不是以上状态，释放已经接收到接收队列中的段，并且统计释放了多少数据，然后回收缓存
+5. 检查是否有未读取的数据
+	- 如果有，将TCP的状态置为 **TCP_CLOSE** ，调用`tcp_send_active_reset()`来发送 RST
+	- 如果没有 并且 设置了 SO_LINGER 但是延时时间为0， 则直接调用 tcp_disconnect() 断开并且删除和释放已经建立但没有被 accept 的传输控制块，再删除并释放已经接收到接收队列 -- 包括失序队列上的段 和 发送队列上的段
+	- 其他情况（如禁止 SO_LINGER 选项 或 启用了 SO_LINGER 且延时时间不为 0）则根据新旧状态转换表 new_state 从当前状态转换到对应的状态，并且得到转换后的动作,如果这个动作是TCP_ACTION_FIN,则发送 FIN 给对端
+6. 再给对端发送 RST 或者 FIN 后，等待套接字的关闭，知道套接字的状态 FIN_WAIT_1、CLOSING、LAST_ACK或者等待超时
+7. **adjudge_to_death**，设置套接字状态未DEAD(`sock_hold(sk)`)，将套接字状态置为孤儿套接字(`sock_orphan(sk)`)，增加系统中孤儿套接字的数量(`atomic_inc(sk->sk_prot->orphan_count)`)
+8. `release_sock(sk)`，真正关闭之前，先处理接收到后备队列上的段
+9. 关闭之前锁定传输控制块
+10. 如果套接字状态已经是 TCP_CLOSE 直接退出
+11. **FIN_WAIT_2** 直接转为 **CLOSE** 状态
+	- 如果传输控制块的 **TCP_LINGER2** 值小于2， 则无需等待转换到 CLOSE ，而是设置CLOSE状态在发送 RST
+	- 根据 `tcp_fin_timeout() `和 往返时间来获取需要爆出 **TIME_WAIT_2** 状态的时长
+		- 如果大于60s,则需要用 TIME_WAIT_2 定时器来处理
+		- 否则，调用 `tcp_time_wait()`,由 timewait 控制块取代 **tcp_sock** 传输控制块，从**FIN_WAIT_2** 直接转为 **CLOSE** 状态
+12. 如果此时的套接字状态是 TCP_CLOSE，则需要检测孤儿套接字数和当前当前发送队列中所有段的数据总长度
+	- **孤儿套接字数 超过 系统配置**，或者 ， **发送队列中所有段的总长度大于发送缓冲区长度上限的最小值** 并且 **当前整个TCP传输层缓冲区分配的内存超过缓冲区可用大小的最高硬性限制** -- 则需要将套接字状态设置为 TCP_CLOSE 并且发送 RST 给对端
+13. 此时套接字状态时 TCP_CLOSE 则需释放传输控制块资源
+
+
