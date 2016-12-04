@@ -411,3 +411,59 @@ static struct inet_protosw inetsw_array[] =
 };
 
 
+
+
+/*
+ * socket.c，孙小强，2016年12月02日23:27:29
+ * sock_fs_type 结构体的定义
+ * line 332
+ * 功能：
+ *      1. 每一种文件都有各自的文件类型，套接字关联的文件类型为套接字文件
+ *      2. 该结构使套接字和文件描述符关联，并支持特殊套接字层的 i 节点的分配和释放
+ */
+
+static struct file_system_type sock_fs_type = {
+    .name =         "sockfs",
+
+/*文件系统类型*/
+
+    .mount =        sockfs_mount,
+
+/*提供分配超级块的接口实现*/
+
+    .kill_sb =      kill_anon_super,
+
+/*提供释放超级块的接口实现*/
+};
+
+
+/*
+ * socket.c，孙小强，2016年12月02日23:36:13
+ * sockfs_ops 结构体的定义
+ * line 304
+ * 功能：
+ *      1.定义了套接字文件系统的操作接口
+ *      2.支持具体的接口有 i 节点的分配、释放、获取文件系统的状态信息
+ */
+static const struct super_operations sockfs_ops = {
+    .alloc_inode    = sock_alloc_inode,
+
+/*
+ *   sock_alloc_inode() 
+ *   套接字文件系统的 i 节点的分配函数
+ */
+
+    .destroy_inode  = sock_destroy_inode,
+
+/*
+ *   sock_destroy_inode()
+ *  套接字文件系统的 i 节点释放函数
+ */    
+    .statfs         = simple_statfs,
+
+/*
+ *   simple_statfs()
+ *   获取套接字文件系统的状态信息函数
+ */
+
+};
